@@ -365,19 +365,19 @@ impl ObjectStore for LocalFileSystem {
                         }
                         PutMode::Create => 
                         {
-                            println!("Case 1: ");
+                            println!("hopsfs-fix arrow-rs Case 1: ");
                             if std::fs::metadata(&path).is_ok() {
-                                  println!("Case 1: path exists ");
+                                  println!("hopsfs-fix arrow-rs Case 1: path exists ");
                                   let ioe = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "File exists");
                                   Some(Error::AlreadyExists { path: path.to_str().unwrap().to_string(), source: ioe })
                             } else {
                               match std::fs::rename(&staging_path, &path) {
                                   Ok(_) => {
-                                    println!("Case 1: rename worked ");
+                                    println!("hopsfs-fix arrow-rs Case 1: rename worked ");
                                     None
                                   }
                                   Err(source) => {
-                                    println!("Case 1: rename failed {} ", source);
+                                    println!("hopsfs-fix arrow-rs Case 1: rename failed {} ", source);
                                     Some(Error::UnableToRenameFile { source })
                                   }
                               }
@@ -631,24 +631,24 @@ impl ObjectStore for LocalFileSystem {
         maybe_spawn_blocking(move || loop {
             let staged = staged_upload_path(&to, &id.to_string());
 
-            println!("Case 2: ");
+            println!("hopsfs-fix arrow-rs Case 2: ");
 
             if std::fs::metadata(&staged).is_ok() {
                 // staged already exists
-                 println!("Case 2: staged already exists ");
+                 println!("hopsfs-fix arrow-rs Case 2: staged already exists ");
                 id+=1
             } else {
               // check if parent exists
               if let Some(parent) = std::path::Path::new(&staged).parent() {
                 if !parent.exists() {
-                    println!("Case 2: parent does not exists ");
+                    println!("hopsfs-fix arrow-rs Case 2: parent does not exists ");
                     let source=std::io::Error::new(std::io::ErrorKind::NotFound, "Not found");
                     create_parent_dirs(&to, source)?
                 }
               }
 
               // parent exist, and staged does not exist
-              println!("Case 2: copy {:?} to {:?} ", from, to);
+              println!("hopsfs-fix arrow-rs Case 2: copy {:?} to {:?} ", from, to);
               
               return std::fs::copy(&from, &to).map(|_bytes_copied| ()).map_err(|source| {
                   Error::UnableToCopyFile { from, to, source }.into()
@@ -698,10 +698,10 @@ impl ObjectStore for LocalFileSystem {
 
         maybe_spawn_blocking(move || loop {
 
-          println!("Case 3: ");
+          println!("hopsfs-fix arrow-rs Case 3: ");
             if std::fs::metadata(&to).is_ok() {
                 // to already exists
-                println!("Case 3: already exists ");
+                println!("hopsfs-fix arrow-rs Case 3: already exists ");
                 return Err(Error::AlreadyExists {
                     path: to.to_str().unwrap().to_string(),
                     source: std::io::Error::new(std::io::ErrorKind::AlreadyExists, "File exists"),
@@ -711,7 +711,7 @@ impl ObjectStore for LocalFileSystem {
               //create parent if missing
               if let Some(parent) = std::path::Path::new(&to).parent() {
                   if !parent.exists() {
-                      println!("Case 3: parent does not exists ");
+                      println!("hopsfs-fix arrow-rs Case 3: parent does not exists ");
                       let source=std::io::Error::new(std::io::ErrorKind::NotFound, "Not found");
                       create_parent_dirs(&to, source)?
                   }
@@ -720,11 +720,11 @@ impl ObjectStore for LocalFileSystem {
               // parent is there. create a copy of the file
               match  std::fs::copy(&from, &to)  {
                 Ok(_) => {
-                  println!("Case 3: copy worked ");
+                  println!("hopsfs-fix arrow-rs Case 3: copy worked ");
                   return Ok(())
                   }
                 Err(source) => {
-                  println!("Case 3: copy failed {} ", source);
+                  println!("hopsfs-fix arrow-rs Case 3: copy failed {} ", source);
                   return Err(Error::UnableToCopyFile { from, to, source }.into())
                   }
               } 
