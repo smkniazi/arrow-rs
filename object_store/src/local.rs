@@ -363,19 +363,39 @@ impl ObjectStore for LocalFileSystem {
                                 Err(source) => Some(Error::UnableToRenameFile { source }),
                             }
                         }
-                        PutMode::Create => match std::fs::hard_link(&staging_path, &path) {
-                            Ok(_) => {
-                                let _ = std::fs::remove_file(&staging_path); // Attempt to cleanup
-                                None
+                        PutMode::Create => 
+                        {
+                            println!("Case 1: ");
+                            if std::fs::metadata(&path).is_ok() {
+                                  println!("Case 1: path exists ");
+                                  let ioe = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "File exists");
+                                  Some(Error::AlreadyExists { path: path.to_str().unwrap().to_string(), source: ioe })
+                            } else {
+                              match std::fs::rename(&staging_path, &path) {
+                                  Ok(_) => {
+                                    println!("Case 1: rename worked ");
+                                    None
+                                  }
+                                  Err(source) => {
+                                    println!("Case 1: rename failed {} ", source);
+                                    Some(Error::UnableToRenameFile { source })
+                                  }
+                              }
                             }
-                            Err(source) => match source.kind() {
-                                ErrorKind::AlreadyExists => Some(Error::AlreadyExists {
-                                    path: path.to_str().unwrap().to_string(),
-                                    source,
-                                }),
-                                _ => Some(Error::UnableToRenameFile { source }),
-                            },
-                        },
+                        }
+                          // match std::fs::hard_link(&staging_path, &path) {
+                          //   Ok(_) => {
+                          //       let _ = std::fs::remove_file(&staging_path); // Attempt to cleanup
+                          //       None
+                          //   }
+                          //   Err(source) => match source.kind() {
+                          //       ErrorKind::AlreadyExists => Some(Error::AlreadyExists {
+                          //           path: path.to_str().unwrap().to_string(),
+                          //           source,
+                          //       }),
+                          //       _ => Some(Error::UnableToRenameFile { source }),
+                          //   },
+                          // },
                         PutMode::Update(_) => unreachable!(),
                     }
                 }
@@ -610,19 +630,49 @@ impl ObjectStore for LocalFileSystem {
         // This is necessary because hard_link returns an error if the destination already exists
         maybe_spawn_blocking(move || loop {
             let staged = staged_upload_path(&to, &id.to_string());
-            match std::fs::hard_link(&from, &staged) {
-                Ok(_) => {
-                    return std::fs::rename(&staged, &to).map_err(|source| {
-                        let _ = std::fs::remove_file(&staged); // Attempt to clean up
-                        Error::UnableToCopyFile { from, to, source }.into()
-                    });
+
+            println!("Case 2: ");
+
+            if std::fs::metadata(&staged).is_ok() {
+                // staged already exists
+                 println!("Case 2: staged already exists ");
+                id+=1
+            } else {
+              // check if parent exists
+              if let Some(parent) = std::path::Path::new(&staged).parent() {
+                if !parent.exists() {
+                    println!("Case 2: parent does not exists ");
+                    let source=std::io::Error::new(std::io::ErrorKind::NotFound, "Not found");
+                    create_parent_dirs(&to, source)?
                 }
-                Err(source) => match source.kind() {
-                    ErrorKind::AlreadyExists => id += 1,
-                    ErrorKind::NotFound => create_parent_dirs(&to, source)?,
-                    _ => return Err(Error::UnableToCopyFile { from, to, source }.into()),
-                },
-            }
+              }
+
+              // parent exist, and staged does not exist
+              println!("Case 2: copy {:?} to {:?} ", from, to);
+              
+              return std::fs::copy(&from, &to).map(|_bytes_copied| ()).map_err(|source| {
+                  Error::UnableToCopyFile { from, to, source }.into()
+              });
+
+              // return std::fs::rename(&from, &to).map_err(|source| {
+                  // Error::UnableToCopyFile { from, to, source }.into()
+              // });
+            } 
+
+
+            // match std::fs::hard_link(&from, &staged) {
+            //    Ok(_) => {
+            //        return std::fs::rename(&staged, &to).map_err(|source| {
+            //            let _ = std::fs::remove_file(&staged); // Attempt to clean up
+                       // Error::UnableToCopyFile { from, to, source }.into()
+            //        });
+            //    }
+            //    Err(source) => match source.kind() {
+            //        ErrorKind::AlreadyExists => id += 1,
+            //        ErrorKind::NotFound => create_parent_dirs(&to, source)?,
+            //        _ => return Err(Error::UnableToCopyFile { from, to, source }.into()),
+            //    },
+            //}
         })
         .await
     }
@@ -647,20 +697,53 @@ impl ObjectStore for LocalFileSystem {
         let to = self.config.path_to_filesystem(to)?;
 
         maybe_spawn_blocking(move || loop {
-            match std::fs::hard_link(&from, &to) {
-                Ok(_) => return Ok(()),
-                Err(source) => match source.kind() {
-                    ErrorKind::AlreadyExists => {
-                        return Err(Error::AlreadyExists {
-                            path: to.to_str().unwrap().to_string(),
-                            source,
-                        }
-                        .into())
-                    }
-                    ErrorKind::NotFound => create_parent_dirs(&to, source)?,
-                    _ => return Err(Error::UnableToCopyFile { from, to, source }.into()),
-                },
+
+          println!("Case 3: ");
+            if std::fs::metadata(&to).is_ok() {
+                // to already exists
+                println!("Case 3: already exists ");
+                return Err(Error::AlreadyExists {
+                    path: to.to_str().unwrap().to_string(),
+                    source: std::io::Error::new(std::io::ErrorKind::AlreadyExists, "File exists"),
+                }
+                .into());
+            } else {
+              //create parent if missing
+              if let Some(parent) = std::path::Path::new(&to).parent() {
+                  if !parent.exists() {
+                      println!("Case 3: parent does not exists ");
+                      let source=std::io::Error::new(std::io::ErrorKind::NotFound, "Not found");
+                      create_parent_dirs(&to, source)?
+                  }
+              }
+
+              // parent is there. create a copy of the file
+              match  std::fs::copy(&from, &to)  {
+                Ok(_) => {
+                  println!("Case 3: copy worked ");
+                  return Ok(())
+                  }
+                Err(source) => {
+                  println!("Case 3: copy failed {} ", source);
+                  return Err(Error::UnableToCopyFile { from, to, source }.into())
+                  }
+              } 
             }
+
+            //match std::fs::hard_link(&from, &to) {
+            //    Ok(_) => return Ok(()),
+            //    Err(source) => match source.kind() {
+            //        ErrorKind::AlreadyExists => {
+            //            return Err(Error::AlreadyExists {
+            //                path: to.to_str().unwrap().to_string(),
+            //                source,
+            //            }
+            //            .into())
+            //        }
+            //        ErrorKind::NotFound => create_parent_dirs(&to, source)?,
+            //        _ => return Err(Error::UnableToCopyFile { from, to, source }.into()),
+            //    },
+            //}
         })
         .await
     }
