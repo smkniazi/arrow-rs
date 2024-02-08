@@ -14,7 +14,6 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-
 //! An object store implementation for a local filesystem
 use crate::{
     maybe_spawn_blocking,
@@ -43,6 +42,9 @@ use std::{collections::VecDeque, path::PathBuf};
 use tokio::io::AsyncWrite;
 use url::Url;
 use walkdir::{DirEntry, WalkDir};
+
+use libc;
+use std::ffi::CString;
 
 /// A specialized `Error` for filesystem object store-related errors
 #[derive(Debug, Snafu)]
@@ -363,19 +365,41 @@ impl ObjectStore for LocalFileSystem {
                                 Err(source) => Some(Error::UnableToRenameFile { source }),
                             }
                         }
-                        PutMode::Create => match std::fs::hard_link(&staging_path, &path) {
-                            Ok(_) => {
-                                let _ = std::fs::remove_file(&staging_path); // Attempt to cleanup
-                                None
-                            }
-                            Err(source) => match source.kind() {
-                                ErrorKind::AlreadyExists => Some(Error::AlreadyExists {
-                                    path: path.to_str().unwrap().to_string(),
-                                    source,
-                                }),
-                                _ => Some(Error::UnableToRenameFile { source }),
-                            },
-                        },
+
+                        PutMode::Create => {
+
+                            println!("hopsfs-fix arrow-rs Case 1: From: {:?} To: {:?}", staging_path, path);
+                            let from_cstring =
+                                CString::new(staging_path.to_string_lossy().to_string())
+                                    .expect("CString::new failed");
+                            let to_cstring = CString::new(path.to_string_lossy().to_string())
+                                .expect("CString::new failed");
+                            unsafe {
+                                let result = libc::renameat2(
+                                    libc::AT_FDCWD,
+                                    from_cstring.as_ptr(),
+                                    libc::AT_FDCWD,
+                                    to_cstring.as_ptr(),
+                                    libc::RENAME_NOREPLACE,
+                                );
+
+                                if result == -1 {
+                                    let error = std::io::Error::last_os_error();
+                                    if error.kind() == std::io::ErrorKind::AlreadyExists {
+                                        println!("hopsfs-fix arrow-rs Case 1: AlreadyExists");
+                                        Some(Error::AlreadyExists {
+                                            path: path.to_str().unwrap().to_string(),
+                                            source: error,
+                                        })
+                                    } else {
+                                        println!("hopsfs-fix arrow-rs Case 1: Unhandled Error {} ", error);
+                                        Some(Error::UnableToRenameFile { source: error })
+                                    }
+                                } else {
+                                    None
+                                }
+                            } //unsafe
+                        }
                         PutMode::Update(_) => unreachable!(),
                     }
                 }
@@ -608,21 +632,42 @@ impl ObjectStore for LocalFileSystem {
         // - atomically rename this temporary file into place
         //
         // This is necessary because hard_link returns an error if the destination already exists
+
         maybe_spawn_blocking(move || loop {
             let staged = staged_upload_path(&to, &id.to_string());
-            match std::fs::hard_link(&from, &staged) {
-                Ok(_) => {
-                    return std::fs::rename(&staged, &to).map_err(|source| {
-                        let _ = std::fs::remove_file(&staged); // Attempt to clean up
-                        Error::UnableToCopyFile { from, to, source }.into()
-                    });
+
+            println!("hopsfs-fix arrow-rs Case 2: From: {:?} To: {:?}", from, to);
+            let from_cstring =
+                CString::new(staged.to_string_lossy().to_string()).expect("CString::new failed");
+            let to_cstring =
+                CString::new(to.to_string_lossy().to_string()).expect("CString::new failed");
+            unsafe {
+                let result = libc::renameat2(
+                    libc::AT_FDCWD,
+                    from_cstring.as_ptr(),
+                    libc::AT_FDCWD,
+                    to_cstring.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                );
+
+                if result == -1 {
+                    let error = std::io::Error::last_os_error();
+                    println!("hopsfs-fix arrow-rs Case 2: {}  ", error);
+                    match error.kind() {
+                        ErrorKind::AlreadyExists => id += 1,
+                        ErrorKind::NotFound => create_parent_dirs(&to, error)?,
+                        _ => {
+                            println!("hopsfs-fix arrow-rs Case 2: unhandled error {}  ", error);
+                            return Err(Error::UnableToCopyFile {
+                                from,
+                                to,
+                                source: error,
+                            }
+                            .into())
+                        }
+                    }
                 }
-                Err(source) => match source.kind() {
-                    ErrorKind::AlreadyExists => id += 1,
-                    ErrorKind::NotFound => create_parent_dirs(&to, source)?,
-                    _ => return Err(Error::UnableToCopyFile { from, to, source }.into()),
-                },
-            }
+            } //unsafe
         })
         .await
     }
@@ -647,19 +692,52 @@ impl ObjectStore for LocalFileSystem {
         let to = self.config.path_to_filesystem(to)?;
 
         maybe_spawn_blocking(move || loop {
-            match std::fs::hard_link(&from, &to) {
-                Ok(_) => return Ok(()),
-                Err(source) => match source.kind() {
-                    ErrorKind::AlreadyExists => {
-                        return Err(Error::AlreadyExists {
-                            path: to.to_str().unwrap().to_string(),
-                            source,
-                        }
-                        .into())
+            println!("hopsfs-fix arrow-rs Case 3: From: {:?} To: {:?}", from, to);
+            if std::fs::metadata(&to).is_ok() {
+                // to already exists
+                println!("hopsfs-fix arrow-rs Case 3: already exists ");
+                return Err(Error::AlreadyExists {
+                    path: to.to_str().unwrap().to_string(),
+                    source: std::io::Error::new(std::io::ErrorKind::AlreadyExists, "File exists"),
+                }
+                .into());
+            } else {
+                //create parent if missing
+                if let Some(parent) = std::path::Path::new(&to).parent() {
+                    if !parent.exists() {
+                        println!("hopsfs-fix arrow-rs Case 3: parent does not exists ");
+                        let source = std::io::Error::new(std::io::ErrorKind::NotFound, "Not found");
+                        create_parent_dirs(&to, source)?
                     }
-                    ErrorKind::NotFound => create_parent_dirs(&to, source)?,
-                    _ => return Err(Error::UnableToCopyFile { from, to, source }.into()),
-                },
+                }
+
+                // parent is there. create a copy of the file
+                match std::fs::copy(&from, &to) {
+                    Ok(_) => {
+                        println!("hopsfs-fix arrow-rs Case 3: copy worked ");
+                        return Ok(());
+                    }
+                    Err(source) => {
+                        println!("hopsfs-fix arrow-rs Case 3: copy failed {} ", source);
+                        match source.kind() {
+                            ErrorKind::AlreadyExists => {
+                                return Err(Error::AlreadyExists {
+                                    path: to.to_str().unwrap().to_string(),
+                                    source: std::io::Error::new(
+                                        std::io::ErrorKind::AlreadyExists,
+                                        "File exists",
+                                    ),
+                                }
+                                .into());
+                            }
+                            ErrorKind::NotFound => {
+                                create_parent_dirs(&to, source)?
+                            }
+
+                            _ => return Err(Error::UnableToCopyFile { from, to, source }.into()),
+                        }
+                    }
+                }
             }
         })
         .await
